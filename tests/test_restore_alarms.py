@@ -234,6 +234,16 @@ class RestoreAlarmEnableTest(unittest.TestCase):
         self.assertEqual(api.calls_of("update"), [])
 
 
+def _create_listing_deleted_alarms(api):
+    original_create = api.create_restore_alarm
+
+    async def create(auth_token, alarm, base_url):
+        await original_create(auth_token, alarm, base_url)
+        return deepcopy(api.alarms)  # deleted ones included
+
+    return create
+
+
 class FixedDatetime(datetime):
     fixed_now: datetime
 
@@ -270,6 +280,21 @@ class RestoreAlarmEditTest(unittest.TestCase):
         self.assertEqual(
             restore_module.restore_alarm_wake_time(device.restore_alarm_by_id(5000)), time(6, 45)
         )
+
+    def test_a_second_edit_ignores_alarms_deleted_by_the_first(self):
+        # Hatch's create answer can include alarms an earlier edit deleted.
+        api = FakeAlarmApi([SATURDAY, WEEKDAYS])
+        api.create_restore_alarm = _create_listing_deleted_alarms(api)
+        device, client = _restore(api)
+
+        first = asyncio.run(device.set_restore_alarm_schedule(1002, wake_time=time(6, 45)))
+        second = asyncio.run(device.set_alarm_weekdays(first, ["saturday"]))
+
+        self.assertEqual((first, second), (5000, 5001))
+        server = {alarm["id"]: alarm["active"] for alarm in api.alarms}
+        self.assertEqual(server, {1001: True, 1002: False, 5000: False, 5001: True})
+        self.assertEqual(_alarm_writes(client), [[5000], [5001]])
+        self.assertEqual([alarm["id"] for alarm in device.restore_alarms], [1001, 5001])
 
     def test_new_weekdays_keep_the_time_and_enabled_state(self):
         api = FakeAlarmApi([SATURDAY, WEEKDAYS])
