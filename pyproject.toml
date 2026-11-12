@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hatch_rest_api"
-version = "1.35.0+restore.1"
+version = "1.35.0+restore.2"
 authors = [
   { name="Brendan Dahl", email="dahl.brendan@gmail.com" },
 ]

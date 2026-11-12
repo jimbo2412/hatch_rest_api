@@ -163,11 +163,13 @@ def _bootstrap_devices(api):
 class RestoreHatch(FakeHatch):
     """A Hatch account holding one original Restore and one Rest Mini."""
 
-    def __init__(self, routines=None, routines_error=None):
+    def __init__(self, routines=None, routines_error=None, alarms=None):
         super().__init__()
         self._routines = routines
         self._routines_error = routines_error
+        self._alarms = alarms
         self.routines_calls = []
+        self.alarm_calls = []
 
     async def iot_devices(self, **kwargs):
         return [
@@ -185,6 +187,12 @@ class RestoreHatch(FakeHatch):
         if self._routines_error is not None:
             raise self._routines_error
         return self._routines
+
+    async def restore_alarms(self, auth_token, mac, base_url):
+        self.alarm_calls.append((mac, base_url))
+        if self._alarms is None:
+            raise ClientError("Invalid response format from API (status: 404)")
+        return self._alarms
 
 
 class GetRestDevicesClientBootstrapTest(unittest.TestCase):
@@ -382,6 +390,29 @@ class GetRestDevicesRestoreTest(unittest.TestCase):
 
                 self.assertIsInstance(restore, Restore)
                 self.assertIsNone(restore.routines)
+
+
+class GetRestDevicesRestoreAlarmsTest(unittest.TestCase):
+    def test_configures_the_alarm_api_with_the_fetched_alarms(self):
+        alarms = [{"id": 1, "active": True, "enabled": True, "time": "2026-01-05 07:00:00"}]
+        api = RestoreHatch(routines=[], alarms=alarms)
+
+        restore, rest_mini = _bootstrap_devices(api)
+
+        self.assertTrue(restore.alarm_capable)
+        self.assertTrue(restore.restore_alarms_loaded)
+        self.assertEqual(restore.restore_alarms, alarms)
+        self.assertEqual(restore.alarm_api_url, "https://data.hatchbaby.com/")
+        self.assertEqual([mac for mac, _ in api.alarm_calls], ["11:22:33:44:55:66"])
+        self.assertFalse(getattr(rest_mini, "alarm_capable", False))
+
+    def test_a_failed_alarm_fetch_still_configures_the_api(self):
+        restore, _ = _bootstrap_devices(RestoreHatch(routines=[], alarms=None))
+
+        # Both hosts tried, nothing loaded, refresh can try again later.
+        self.assertTrue(restore.alarm_capable)
+        self.assertFalse(restore.restore_alarms_loaded)
+        self.assertEqual(restore.restore_alarms, [])
 
 
 if __name__ == "__main__":
