@@ -1,5 +1,5 @@
 from .aws_http import AwsHttp
-from .errors import BaseError, RateError, AuthError
+from .errors import BaseError, RateError, AuthError, DeviceSyncError
 from .hatch import Hatch
 from .rest_mini import RestMini
 from .rest_plus import RestPlus
