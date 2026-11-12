@@ -589,17 +589,7 @@ class Restore(ShadowClientSubscriberMixin):
             alarm=self._alarm_request(edited, active=True),
             base_url=self._alarm_url(),
         )
-        known_ids = {str(alarm.get("id")) for alarm in alarms}
-        copy = next(
-            (
-                alarm
-                for alarm in created or []
-                if isinstance(alarm, dict)
-                and alarm.get("id") is not None
-                and str(alarm.get("id")) not in known_ids
-            ),
-            None,
-        )
+        copy = self._created_copy(created, alarms, edited)
         if copy is None:
             raise ClientError(f"Hatch did not return the edited copy of alarm {alarm_id}")
         # Hatch returns the copy inactive; it becomes the active one below.
@@ -622,6 +612,35 @@ class Restore(ShadowClientSubscriberMixin):
     async def set_alarm_weekdays(self, alarm_id: int | str, weekdays: Iterable[str]) -> int:
         """Same signature as the scheduled-routine alarm models' method."""
         return await self.set_restore_alarm_schedule(alarm_id, weekdays=list(weekdays))
+
+    @staticmethod
+    def _created_copy(
+        created: list[dict[str, Any]] | None,
+        alarms: list[dict[str, Any]],
+        edited: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """The alarm a create call made, out of the list Hatch answers with.
+
+        The answer can also hold alarms deleted by earlier edits, which are
+        new to ``alarms`` too, so prefer the one matching what was sent, and
+        the newest of those.
+        """
+        known_ids = {str(alarm.get("id")) for alarm in alarms}
+        candidates = [
+            alarm
+            for alarm in created or []
+            if isinstance(alarm, dict)
+            and alarm.get("id") is not None
+            and str(alarm.get("id")) not in known_ids
+        ]
+        matching = [
+            alarm
+            for alarm in candidates
+            if alarm.get("time") == edited.get("time")
+            and alarm.get("daysOfWeek") == edited.get("daysOfWeek")
+        ]
+        pool = matching or candidates
+        return max(pool, key=lambda alarm: int(alarm["id"])) if pool else None
 
     def _configured_alarm_api(self) -> "tuple[Hatch, str]":
         if self._alarm_api is None or self._alarm_auth_token is None:
