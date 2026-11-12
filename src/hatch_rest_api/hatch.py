@@ -120,6 +120,8 @@ class Hatch:
                 "riot",
                 "riotPlus",
                 "restBaby",
+                # The original Restore; "restoreIot" is the later first gen.
+                "restore",
                 "restoreIot",
                 "restoreV4",
                 "restoreV5",

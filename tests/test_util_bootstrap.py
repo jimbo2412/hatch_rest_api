@@ -1,10 +1,13 @@
 import asyncio
 import sys
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from hatch_rest_api import util_bootstrap
+from aiohttp import ClientError
+
+from hatch_rest_api import RateError, RestMini, Restore, util_bootstrap
 
 
 class FakeHatch:
@@ -116,17 +119,7 @@ def _run_bootstrap(io_mock=None, connection=None):
     if io_mock is None:
         io_mock = MagicMock()
 
-    with (
-        patch.object(util_bootstrap, "Hatch", FakeHatch),
-        patch.object(util_bootstrap, "Contentful", MagicMock()),
-        patch.object(util_bootstrap, "AwsHttp", FakeAwsHttp),
-        patch.object(util_bootstrap, "AwsCredentialsProvider", MagicMock()),
-        patch.object(util_bootstrap, "io", io_mock),
-        patch.object(
-            util_bootstrap, "IotShadowClient", lambda *a, **kw: FakeShadowClient()
-        ),
-        patch.object(util_bootstrap, "websockets_with_default_aws_signing", builder),
-    ):
+    with _patched_bootstrap(FakeHatch, io_mock, builder):
         asyncio.run(
             util_bootstrap.get_rest_devices(
                 email="user@example.com", password="hunter2"
@@ -134,6 +127,64 @@ def _run_bootstrap(io_mock=None, connection=None):
         )
 
     return builder, io_mock
+
+
+def _patched_bootstrap(hatch, io_mock, builder) -> ExitStack:
+    """Patch every network dependency of get_rest_devices.
+
+    ``hatch`` replaces the Hatch REST client class; anything callable that
+    returns a client will do, so tests can hand in a prepared instance.
+    """
+    stack = ExitStack()
+    for name, replacement in (
+        ("Hatch", hatch),
+        ("Contentful", MagicMock()),
+        ("AwsHttp", FakeAwsHttp),
+        ("AwsCredentialsProvider", MagicMock()),
+        ("io", io_mock),
+        ("IotShadowClient", lambda *a, **kw: FakeShadowClient()),
+        ("websockets_with_default_aws_signing", builder),
+    ):
+        stack.enter_context(patch.object(util_bootstrap, name, replacement))
+    return stack
+
+
+def _bootstrap_devices(api):
+    """Run get_rest_devices against the prepared client ``api``; return its devices."""
+    with _patched_bootstrap(lambda *a, **kw: api, MagicMock(), MagicMock()):
+        _, _, devices, _ = asyncio.run(
+            util_bootstrap.get_rest_devices(
+                email="user@example.com", password="hunter2"
+            )
+        )
+    return devices
+
+
+class RestoreHatch(FakeHatch):
+    """A Hatch account holding one original Restore and one Rest Mini."""
+
+    def __init__(self, routines=None, routines_error=None):
+        super().__init__()
+        self._routines = routines
+        self._routines_error = routines_error
+        self.routines_calls = []
+
+    async def iot_devices(self, **kwargs):
+        return [
+            {
+                "product": "restore",
+                "name": "Bedroom",
+                "thingName": "thing-restore",
+                "macAddress": "11:22:33:44:55:66",
+            },
+            *await super().iot_devices(**kwargs),
+        ]
+
+    async def routines(self, auth_token, mac):
+        self.routines_calls.append(mac)
+        if self._routines_error is not None:
+            raise self._routines_error
+        return self._routines
 
 
 class GetRestDevicesClientBootstrapTest(unittest.TestCase):
@@ -291,6 +342,46 @@ class GetRestDevicesNativeArityTest(unittest.TestCase):
             _run_bootstrap(connection=connection)
 
         self.assertEqual(connection.connect_calls, 2)
+
+
+class GetRestDevicesRestoreTest(unittest.TestCase):
+    """The original Restore (product ``restore``) must not become a RestMini.
+
+    Any product create_rest_devices does not match falls through to RestMini,
+    whose shadow parser reads keys this model does not report.
+    """
+
+    def test_builds_a_restore(self):
+        restore, rest_mini = _bootstrap_devices(RestoreHatch(routines=[]))
+
+        self.assertIsInstance(restore, Restore)
+        self.assertEqual(restore.device_name, "Bedroom")
+        self.assertEqual(restore.thing_name, "thing-restore")
+        self.assertEqual(restore.mac, "11:22:33:44:55:66")
+        self.assertIsInstance(rest_mini, RestMini)
+
+    def test_probes_routines_for_the_restore_only(self):
+        routines = [{"id": 7, "name": "Bedtime", "type": "routine"}]
+        api = RestoreHatch(routines=routines)
+
+        restore, _ = _bootstrap_devices(api)
+
+        self.assertEqual(api.routines_calls, ["11:22:33:44:55:66"])
+        self.assertEqual(restore.routines, routines)
+        # Not treated as favorites: those become scenes that call set_favorite.
+        self.assertEqual(restore.favorites, [])
+
+    def test_a_failed_routine_probe_does_not_fail_setup(self):
+        for error in (
+            ClientError("api error:not supported"),
+            RateError("API rate limit exceeded."),
+            KeyError("payload"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                restore, _ = _bootstrap_devices(RestoreHatch(routines_error=error))
+
+                self.assertIsInstance(restore, Restore)
+                self.assertIsNone(restore.routines)
 
 
 if __name__ == "__main__":
